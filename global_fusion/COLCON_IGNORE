@@ -1,0 +1,2 @@
+global_fusion is still the upstream ROS1/catkin package.
+It is intentionally skipped by the ROS2 Humble build until it is ported.

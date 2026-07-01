@@ -9,21 +9,21 @@
 
 #include "visualization.h"
 
-using namespace ros;
 using namespace Eigen;
-ros::Publisher pub_odometry, pub_latest_odometry;
-ros::Publisher pub_path;
-ros::Publisher pub_point_cloud, pub_margin_cloud;
-ros::Publisher pub_key_poses;
-ros::Publisher pub_camera_pose;
-ros::Publisher pub_camera_pose_visual;
+rclcpp::Publisher<nav_msgs::Odometry>::SharedPtr pub_odometry, pub_latest_odometry;
+rclcpp::Publisher<nav_msgs::Path>::SharedPtr pub_path;
+rclcpp::Publisher<sensor_msgs::PointCloud>::SharedPtr pub_point_cloud, pub_margin_cloud;
+rclcpp::Publisher<visualization_msgs::Marker>::SharedPtr pub_key_poses;
+rclcpp::Publisher<nav_msgs::Odometry>::SharedPtr pub_camera_pose;
+rclcpp::Publisher<visualization_msgs::MarkerArray>::SharedPtr pub_camera_pose_visual;
 nav_msgs::Path path;
 
-ros::Publisher pub_keyframe_pose;
-ros::Publisher pub_keyframe_point;
-ros::Publisher pub_extrinsic;
+rclcpp::Publisher<nav_msgs::Odometry>::SharedPtr pub_keyframe_pose;
+rclcpp::Publisher<sensor_msgs::PointCloud>::SharedPtr pub_keyframe_point;
+rclcpp::Publisher<nav_msgs::Odometry>::SharedPtr pub_extrinsic;
 
-ros::Publisher pub_image_track;
+rclcpp::Publisher<sensor_msgs::Image>::SharedPtr pub_image_track;
+std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster;
 
 CameraPoseVisualization cameraposevisual(1, 0, 0, 1);
 static double sum_of_path = 0;
@@ -31,20 +31,21 @@ static Vector3d last_path(0.0, 0.0, 0.0);
 
 size_t pub_counter = 0;
 
-void registerPub(ros::NodeHandle &n)
+void registerPub(const rclcpp::Node::SharedPtr &node)
 {
-    pub_latest_odometry = n.advertise<nav_msgs::Odometry>("imu_propagate", 1000);
-    pub_path = n.advertise<nav_msgs::Path>("path", 1000);
-    pub_odometry = n.advertise<nav_msgs::Odometry>("odometry", 1000);
-    pub_point_cloud = n.advertise<sensor_msgs::PointCloud>("point_cloud", 1000);
-    pub_margin_cloud = n.advertise<sensor_msgs::PointCloud>("margin_cloud", 1000);
-    pub_key_poses = n.advertise<visualization_msgs::Marker>("key_poses", 1000);
-    pub_camera_pose = n.advertise<nav_msgs::Odometry>("camera_pose", 1000);
-    pub_camera_pose_visual = n.advertise<visualization_msgs::MarkerArray>("camera_pose_visual", 1000);
-    pub_keyframe_pose = n.advertise<nav_msgs::Odometry>("keyframe_pose", 1000);
-    pub_keyframe_point = n.advertise<sensor_msgs::PointCloud>("keyframe_point", 1000);
-    pub_extrinsic = n.advertise<nav_msgs::Odometry>("extrinsic", 1000);
-    pub_image_track = n.advertise<sensor_msgs::Image>("image_track", 1000);
+    pub_latest_odometry = node->create_publisher<nav_msgs::Odometry>("imu_propagate", 1000);
+    pub_path = node->create_publisher<nav_msgs::Path>("path", 1000);
+    pub_odometry = node->create_publisher<nav_msgs::Odometry>("odometry", 1000);
+    pub_point_cloud = node->create_publisher<sensor_msgs::PointCloud>("point_cloud", 1000);
+    pub_margin_cloud = node->create_publisher<sensor_msgs::PointCloud>("margin_cloud", 1000);
+    pub_key_poses = node->create_publisher<visualization_msgs::Marker>("key_poses", 1000);
+    pub_camera_pose = node->create_publisher<nav_msgs::Odometry>("camera_pose", 1000);
+    pub_camera_pose_visual = node->create_publisher<visualization_msgs::MarkerArray>("camera_pose_visual", 1000);
+    pub_keyframe_pose = node->create_publisher<nav_msgs::Odometry>("keyframe_pose", 1000);
+    pub_keyframe_point = node->create_publisher<sensor_msgs::PointCloud>("keyframe_point", 1000);
+    pub_extrinsic = node->create_publisher<nav_msgs::Odometry>("extrinsic", 1000);
+    pub_image_track = node->create_publisher<sensor_msgs::Image>("image_track", 1000);
+    tf_broadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(node);
 
     cameraposevisual.setScale(0.1);
     cameraposevisual.setLineWidth(0.01);
@@ -65,7 +66,7 @@ void pubLatestOdometry(const Eigen::Vector3d &P, const Eigen::Quaterniond &Q, co
     odometry.twist.twist.linear.x = V.x();
     odometry.twist.twist.linear.y = V.y();
     odometry.twist.twist.linear.z = V.z();
-    pub_latest_odometry.publish(odometry);
+    pub_latest_odometry->publish(odometry);
 }
 
 void pubTrackImage(const cv::Mat &imgTrack, const double t)
@@ -73,8 +74,8 @@ void pubTrackImage(const cv::Mat &imgTrack, const double t)
     std_msgs::Header header;
     header.frame_id = "world";
     header.stamp = ros::Time(t);
-    sensor_msgs::ImagePtr imgTrackMsg = cv_bridge::CvImage(header, "bgr8", imgTrack).toImageMsg();
-    pub_image_track.publish(imgTrackMsg);
+    auto imgTrackMsg = cv_bridge::CvImage(header, "bgr8", imgTrack).toImageMsg();
+    pub_image_track->publish(*imgTrackMsg);
 }
 
 
@@ -141,7 +142,7 @@ void pubOdometry(const Estimator &estimator, const std_msgs::Header &header)
         odometry.twist.twist.linear.x = estimator.Vs[WINDOW_SIZE].x();
         odometry.twist.twist.linear.y = estimator.Vs[WINDOW_SIZE].y();
         odometry.twist.twist.linear.z = estimator.Vs[WINDOW_SIZE].z();
-        pub_odometry.publish(odometry);
+        pub_odometry->publish(odometry);
 
         geometry_msgs::PoseStamped pose_stamped;
         pose_stamped.header = header;
@@ -150,13 +151,13 @@ void pubOdometry(const Estimator &estimator, const std_msgs::Header &header)
         path.header = header;
         path.header.frame_id = "world";
         path.poses.push_back(pose_stamped);
-        pub_path.publish(path);
+        pub_path->publish(path);
 
         // write result to file
         ofstream foutC(VINS_RESULT_PATH, ios::app);
         foutC.setf(ios::fixed, ios::floatfield);
         foutC.precision(0);
-        foutC << header.stamp.toSec() * 1e9 << ",";
+        foutC << vins_ros2::stampToSec(header.stamp) * 1e9 << ",";
         foutC.precision(5);
         foutC << estimator.Ps[WINDOW_SIZE].x() << ","
               << estimator.Ps[WINDOW_SIZE].y() << ","
@@ -170,7 +171,7 @@ void pubOdometry(const Estimator &estimator, const std_msgs::Header &header)
               << estimator.Vs[WINDOW_SIZE].z() << "," << endl;
         foutC.close();
         Eigen::Vector3d tmp_T = estimator.Ps[WINDOW_SIZE];
-        printf("time: %f, t: %f %f %f q: %f %f %f %f \n", header.stamp.toSec(), tmp_T.x(), tmp_T.y(), tmp_T.z(),
+        printf("time: %f, t: %f %f %f q: %f %f %f %f \n", vins_ros2::stampToSec(header.stamp), tmp_T.x(), tmp_T.y(), tmp_T.z(),
                                                           tmp_Q.w(), tmp_Q.x(), tmp_Q.y(), tmp_Q.z());
     }
 }
@@ -206,7 +207,7 @@ void pubKeyPoses(const Estimator &estimator, const std_msgs::Header &header)
         pose_marker.z = correct_pose.z();
         key_poses.points.push_back(pose_marker);
     }
-    pub_key_poses.publish(key_poses);
+    pub_key_poses->publish(key_poses);
 }
 
 void pubCameraPose(const Estimator &estimator, const std_msgs::Header &header)
@@ -230,7 +231,7 @@ void pubCameraPose(const Estimator &estimator, const std_msgs::Header &header)
         odometry.pose.pose.orientation.z = R.z();
         odometry.pose.pose.orientation.w = R.w();
 
-        pub_camera_pose.publish(odometry);
+        pub_camera_pose->publish(odometry);
 
         cameraposevisual.reset();
         cameraposevisual.add_pose(P, R);
@@ -270,7 +271,7 @@ void pubPointCloud(const Estimator &estimator, const std_msgs::Header &header)
         p.z = w_pts_i(2);
         point_cloud.points.push_back(p);
     }
-    pub_point_cloud.publish(point_cloud);
+    pub_point_cloud->publish(point_cloud);
 
 
     // pub margined potin
@@ -300,7 +301,7 @@ void pubPointCloud(const Estimator &estimator, const std_msgs::Header &header)
             margin_cloud.points.push_back(p);
         }
     }
-    pub_margin_cloud.publish(margin_cloud);
+    pub_margin_cloud->publish(margin_cloud);
 }
 
 
@@ -308,35 +309,41 @@ void pubTF(const Estimator &estimator, const std_msgs::Header &header)
 {
     if( estimator.solver_flag != Estimator::SolverFlag::NON_LINEAR)
         return;
-    static tf::TransformBroadcaster br;
-    tf::Transform transform;
-    tf::Quaternion q;
     // body frame
     Vector3d correct_t;
     Quaterniond correct_q;
     correct_t = estimator.Ps[WINDOW_SIZE];
     correct_q = estimator.Rs[WINDOW_SIZE];
 
-    transform.setOrigin(tf::Vector3(correct_t(0),
-                                    correct_t(1),
-                                    correct_t(2)));
-    q.setW(correct_q.w());
-    q.setX(correct_q.x());
-    q.setY(correct_q.y());
-    q.setZ(correct_q.z());
-    transform.setRotation(q);
-    br.sendTransform(tf::StampedTransform(transform, header.stamp, "world", "body"));
+    geometry_msgs::msg::TransformStamped body_tf;
+    body_tf.header.stamp = header.stamp;
+    body_tf.header.frame_id = "world";
+    body_tf.child_frame_id = "body";
+    body_tf.transform.translation.x = correct_t(0);
+    body_tf.transform.translation.y = correct_t(1);
+    body_tf.transform.translation.z = correct_t(2);
+    body_tf.transform.rotation.w = correct_q.w();
+    body_tf.transform.rotation.x = correct_q.x();
+    body_tf.transform.rotation.y = correct_q.y();
+    body_tf.transform.rotation.z = correct_q.z();
+    if (tf_broadcaster)
+        tf_broadcaster->sendTransform(body_tf);
 
     // camera frame
-    transform.setOrigin(tf::Vector3(estimator.tic[0].x(),
-                                    estimator.tic[0].y(),
-                                    estimator.tic[0].z()));
-    q.setW(Quaterniond(estimator.ric[0]).w());
-    q.setX(Quaterniond(estimator.ric[0]).x());
-    q.setY(Quaterniond(estimator.ric[0]).y());
-    q.setZ(Quaterniond(estimator.ric[0]).z());
-    transform.setRotation(q);
-    br.sendTransform(tf::StampedTransform(transform, header.stamp, "body", "camera"));
+    Quaterniond cam_q{estimator.ric[0]};
+    geometry_msgs::msg::TransformStamped camera_tf;
+    camera_tf.header.stamp = header.stamp;
+    camera_tf.header.frame_id = "body";
+    camera_tf.child_frame_id = "camera";
+    camera_tf.transform.translation.x = estimator.tic[0].x();
+    camera_tf.transform.translation.y = estimator.tic[0].y();
+    camera_tf.transform.translation.z = estimator.tic[0].z();
+    camera_tf.transform.rotation.w = cam_q.w();
+    camera_tf.transform.rotation.x = cam_q.x();
+    camera_tf.transform.rotation.y = cam_q.y();
+    camera_tf.transform.rotation.z = cam_q.z();
+    if (tf_broadcaster)
+        tf_broadcaster->sendTransform(camera_tf);
 
     
     nav_msgs::Odometry odometry;
@@ -350,7 +357,7 @@ void pubTF(const Estimator &estimator, const std_msgs::Header &header)
     odometry.pose.pose.orientation.y = tmp_q.y();
     odometry.pose.pose.orientation.z = tmp_q.z();
     odometry.pose.pose.orientation.w = tmp_q.w();
-    pub_extrinsic.publish(odometry);
+    pub_extrinsic->publish(odometry);
 
 }
 
@@ -376,7 +383,7 @@ void pubKeyframe(const Estimator &estimator)
         odometry.pose.pose.orientation.w = R.w();
         //printf("time: %f t: %f %f %f r: %f %f %f %f\n", odometry.header.stamp.toSec(), P.x(), P.y(), P.z(), R.w(), R.x(), R.y(), R.z());
 
-        pub_keyframe_pose.publish(odometry);
+        pub_keyframe_pose->publish(odometry);
 
 
         sensor_msgs::PointCloud point_cloud;
@@ -409,6 +416,6 @@ void pubKeyframe(const Estimator &estimator)
             }
 
         }
-        pub_keyframe_point.publish(point_cloud);
+        pub_keyframe_point->publish(point_cloud);
     }
 }

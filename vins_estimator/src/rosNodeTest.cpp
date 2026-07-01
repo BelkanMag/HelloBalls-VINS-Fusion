@@ -1,51 +1,51 @@
 /*******************************************************
  * Copyright (C) 2019, Aerial Robotics Group, Hong Kong University of Science and Technology
- * 
+ *
  * This file is part of VINS.
- * 
+ *
  * Licensed under the GNU General Public License v3.0;
  * you may not use this file except in compliance with the License.
  *
  * Author: Qin Tong (qintonguav@gmail.com)
  *******************************************************/
 
-#include <stdio.h>
-#include <queue>
 #include <map>
-#include <thread>
 #include <mutex>
-#include <ros/ros.h>
+#include <queue>
+#include <stdio.h>
+#include <thread>
+
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/image_encodings.hpp>
+
 #include "estimator/estimator.h"
 #include "estimator/parameters.h"
+#include "ros2_message_aliases.h"
 #include "utility/visualization.h"
 
 Estimator estimator;
 
-queue<sensor_msgs::ImuConstPtr> imu_buf;
-queue<sensor_msgs::PointCloudConstPtr> feature_buf;
-queue<sensor_msgs::ImageConstPtr> img0_buf;
-queue<sensor_msgs::ImageConstPtr> img1_buf;
+std::queue<sensor_msgs::Imu::ConstSharedPtr> imu_buf;
+std::queue<sensor_msgs::PointCloud::ConstSharedPtr> feature_buf;
+std::queue<sensor_msgs::Image::ConstSharedPtr> img0_buf;
+std::queue<sensor_msgs::Image::ConstSharedPtr> img1_buf;
 std::mutex m_buf;
 
-
-void img0_callback(const sensor_msgs::ImageConstPtr &img_msg)
+void img0_callback(const sensor_msgs::Image::ConstSharedPtr img_msg)
 {
-    m_buf.lock();
+    std::lock_guard<std::mutex> lock(m_buf);
     img0_buf.push(img_msg);
-    m_buf.unlock();
 }
 
-void img1_callback(const sensor_msgs::ImageConstPtr &img_msg)
+void img1_callback(const sensor_msgs::Image::ConstSharedPtr img_msg)
 {
-    m_buf.lock();
+    std::lock_guard<std::mutex> lock(m_buf);
     img1_buf.push(img_msg);
-    m_buf.unlock();
 }
 
-
-cv::Mat getImageFromMsg(const sensor_msgs::ImageConstPtr &img_msg)
+cv::Mat getImageFromMsg(const sensor_msgs::Image::ConstSharedPtr img_msg)
 {
     cv_bridge::CvImageConstPtr ptr;
     if (img_msg->encoding == "8UC1")
@@ -67,90 +67,81 @@ cv::Mat getImageFromMsg(const sensor_msgs::ImageConstPtr &img_msg)
     return img;
 }
 
-// extract images with same timestamp from two topics
 void sync_process()
 {
-    while(1)
+    while (rclcpp::ok())
     {
-        if(STEREO)
+        if (STEREO)
         {
             cv::Mat image0, image1;
-            std_msgs::Header header;
             double time = 0;
-            m_buf.lock();
-            if (!img0_buf.empty() && !img1_buf.empty())
             {
-                double time0 = img0_buf.front()->header.stamp.toSec();
-                double time1 = img1_buf.front()->header.stamp.toSec();
-                // 0.003s sync tolerance
-                if(time0 < time1 - 0.003)
+                std::lock_guard<std::mutex> lock(m_buf);
+                if (!img0_buf.empty() && !img1_buf.empty())
                 {
-                    img0_buf.pop();
-                    printf("throw img0\n");
-                }
-                else if(time0 > time1 + 0.003)
-                {
-                    img1_buf.pop();
-                    printf("throw img1\n");
-                }
-                else
-                {
-                    time = img0_buf.front()->header.stamp.toSec();
-                    header = img0_buf.front()->header;
-                    image0 = getImageFromMsg(img0_buf.front());
-                    img0_buf.pop();
-                    image1 = getImageFromMsg(img1_buf.front());
-                    img1_buf.pop();
-                    //printf("find img0 and img1\n");
+                    double time0 = vins_ros2::stampToSec(img0_buf.front()->header.stamp);
+                    double time1 = vins_ros2::stampToSec(img1_buf.front()->header.stamp);
+                    if (time0 < time1 - 0.003)
+                    {
+                        img0_buf.pop();
+                        printf("throw img0\n");
+                    }
+                    else if (time0 > time1 + 0.003)
+                    {
+                        img1_buf.pop();
+                        printf("throw img1\n");
+                    }
+                    else
+                    {
+                        time = vins_ros2::stampToSec(img0_buf.front()->header.stamp);
+                        image0 = getImageFromMsg(img0_buf.front());
+                        img0_buf.pop();
+                        image1 = getImageFromMsg(img1_buf.front());
+                        img1_buf.pop();
+                    }
                 }
             }
-            m_buf.unlock();
-            if(!image0.empty())
+            if (!image0.empty())
                 estimator.inputImage(time, image0, image1);
         }
         else
         {
             cv::Mat image;
-            std_msgs::Header header;
             double time = 0;
-            m_buf.lock();
-            if(!img0_buf.empty())
             {
-                time = img0_buf.front()->header.stamp.toSec();
-                header = img0_buf.front()->header;
-                image = getImageFromMsg(img0_buf.front());
-                img0_buf.pop();
+                std::lock_guard<std::mutex> lock(m_buf);
+                if (!img0_buf.empty())
+                {
+                    time = vins_ros2::stampToSec(img0_buf.front()->header.stamp);
+                    image = getImageFromMsg(img0_buf.front());
+                    img0_buf.pop();
+                }
             }
-            m_buf.unlock();
-            if(!image.empty())
+            if (!image.empty())
                 estimator.inputImage(time, image);
         }
 
-        std::chrono::milliseconds dura(2);
-        std::this_thread::sleep_for(dura);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 }
 
-
-void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
+void imu_callback(const sensor_msgs::Imu::ConstSharedPtr imu_msg)
 {
-    double t = imu_msg->header.stamp.toSec();
-    double dx = imu_msg->linear_acceleration.x;
-    double dy = imu_msg->linear_acceleration.y;
-    double dz = imu_msg->linear_acceleration.z;
-    double rx = imu_msg->angular_velocity.x;
-    double ry = imu_msg->angular_velocity.y;
-    double rz = imu_msg->angular_velocity.z;
-    Vector3d acc(dx, dy, dz);
-    Vector3d gyr(rx, ry, rz);
+    double t = vins_ros2::stampToSec(imu_msg->header.stamp);
+    Eigen::Vector3d acc(
+        imu_msg->linear_acceleration.x,
+        imu_msg->linear_acceleration.y,
+        imu_msg->linear_acceleration.z);
+    Eigen::Vector3d gyr(
+        imu_msg->angular_velocity.x,
+        imu_msg->angular_velocity.y,
+        imu_msg->angular_velocity.z);
     estimator.inputIMU(t, acc, gyr);
-    return;
 }
 
-
-void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg)
+void feature_callback(const sensor_msgs::PointCloud::ConstSharedPtr feature_msg)
 {
-    map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
+    std::map<int, std::vector<std::pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
     for (unsigned int i = 0; i < feature_msg->points.size(); i++)
     {
         int feature_id = feature_msg->channels[0].values[i];
@@ -162,81 +153,60 @@ void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg)
         double p_v = feature_msg->channels[3].values[i];
         double velocity_x = feature_msg->channels[4].values[i];
         double velocity_y = feature_msg->channels[5].values[i];
-        if(feature_msg->channels.size() > 5)
+        if (feature_msg->channels.size() > 8)
         {
             double gx = feature_msg->channels[6].values[i];
             double gy = feature_msg->channels[7].values[i];
             double gz = feature_msg->channels[8].values[i];
             pts_gt[feature_id] = Eigen::Vector3d(gx, gy, gz);
-            //printf("receive pts gt %d %f %f %f\n", feature_id, gx, gy, gz);
         }
         ROS_ASSERT(z == 1);
         Eigen::Matrix<double, 7, 1> xyz_uv_velocity;
         xyz_uv_velocity << x, y, z, p_u, p_v, velocity_x, velocity_y;
-        featureFrame[feature_id].emplace_back(camera_id,  xyz_uv_velocity);
+        featureFrame[feature_id].emplace_back(camera_id, xyz_uv_velocity);
     }
-    double t = feature_msg->header.stamp.toSec();
+    double t = vins_ros2::stampToSec(feature_msg->header.stamp);
     estimator.inputFeature(t, featureFrame);
-    return;
 }
 
-void restart_callback(const std_msgs::BoolConstPtr &restart_msg)
+void restart_callback(const std_msgs::Bool::ConstSharedPtr restart_msg)
 {
-    if (restart_msg->data == true)
+    if (restart_msg->data)
     {
         ROS_WARN("restart the estimator!");
         estimator.clearState();
         estimator.setParameter();
     }
-    return;
 }
 
-void imu_switch_callback(const std_msgs::BoolConstPtr &switch_msg)
+void imu_switch_callback(const std_msgs::Bool::ConstSharedPtr switch_msg)
 {
-    if (switch_msg->data == true)
-    {
-        //ROS_WARN("use IMU!");
-        estimator.changeSensorType(1, STEREO);
-    }
-    else
-    {
-        //ROS_WARN("disable IMU!");
-        estimator.changeSensorType(0, STEREO);
-    }
-    return;
+    estimator.changeSensorType(switch_msg->data ? 1 : 0, STEREO);
 }
 
-void cam_switch_callback(const std_msgs::BoolConstPtr &switch_msg)
+void cam_switch_callback(const std_msgs::Bool::ConstSharedPtr switch_msg)
 {
-    if (switch_msg->data == true)
-    {
-        //ROS_WARN("use stereo!");
-        estimator.changeSensorType(USE_IMU, 1);
-    }
-    else
-    {
-        //ROS_WARN("use mono camera (left)!");
-        estimator.changeSensorType(USE_IMU, 0);
-    }
-    return;
+    estimator.changeSensorType(USE_IMU, switch_msg->data ? 1 : 0);
 }
 
 int main(int argc, char **argv)
 {
-    ros::init(argc, argv, "vins_estimator");
-    ros::NodeHandle n("~");
-    ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Info);
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<rclcpp::Node>("vins_estimator");
 
-    if(argc != 2)
+    node->declare_parameter<std::string>("config_file", "");
+    std::string config_file = node->get_parameter("config_file").as_string();
+    if (config_file.empty() && argc >= 2 && std::string(argv[1]).rfind("--", 0) != 0)
+        config_file = argv[1];
+
+    if (config_file.empty())
     {
-        printf("please intput: rosrun vins vins_node [config file] \n"
-               "for example: rosrun vins vins_node "
-               "~/catkin_ws/src/VINS-Fusion/config/euroc/euroc_stereo_imu_config.yaml \n");
+        ROS_ERROR("Missing config_file parameter. Example: ros2 run vins vins_node --ros-args -p config_file:=/path/to/config.yaml");
+        rclcpp::shutdown();
         return 1;
     }
 
-    string config_file = argv[1];
-    printf("config_file: %s\n", argv[1]);
+    printf("config_file: %s\n", config_file.c_str());
 
     readParameters(config_file);
     estimator.setParameter();
@@ -247,26 +217,35 @@ int main(int argc, char **argv)
 
     ROS_WARN("waiting for image and imu...");
 
-    registerPub(n);
+    registerPub(node);
 
-    ros::Subscriber sub_imu;
-    if(USE_IMU)
+    rclcpp::Subscription<sensor_msgs::Imu>::SharedPtr sub_imu;
+    if (USE_IMU)
     {
-        sub_imu = n.subscribe(IMU_TOPIC, 2000, imu_callback, ros::TransportHints().tcpNoDelay());
+        sub_imu = node->create_subscription<sensor_msgs::Imu>(
+            IMU_TOPIC, rclcpp::SensorDataQoS(), imu_callback);
     }
-    ros::Subscriber sub_feature = n.subscribe("/feature_tracker/feature", 2000, feature_callback);
-    ros::Subscriber sub_img0 = n.subscribe(IMAGE0_TOPIC, 100, img0_callback);
-    ros::Subscriber sub_img1;
-    if(STEREO)
+    auto sub_feature = node->create_subscription<sensor_msgs::PointCloud>(
+        "/feature_tracker/feature", 2000, feature_callback);
+    auto sub_img0 = node->create_subscription<sensor_msgs::Image>(
+        IMAGE0_TOPIC, rclcpp::SensorDataQoS(), img0_callback);
+    rclcpp::Subscription<sensor_msgs::Image>::SharedPtr sub_img1;
+    if (STEREO)
     {
-        sub_img1 = n.subscribe(IMAGE1_TOPIC, 100, img1_callback);
+        sub_img1 = node->create_subscription<sensor_msgs::Image>(
+            IMAGE1_TOPIC, rclcpp::SensorDataQoS(), img1_callback);
     }
-    ros::Subscriber sub_restart = n.subscribe("/vins_restart", 100, restart_callback);
-    ros::Subscriber sub_imu_switch = n.subscribe("/vins_imu_switch", 100, imu_switch_callback);
-    ros::Subscriber sub_cam_switch = n.subscribe("/vins_cam_switch", 100, cam_switch_callback);
+    auto sub_restart = node->create_subscription<std_msgs::Bool>(
+        "/vins_restart", 100, restart_callback);
+    auto sub_imu_switch = node->create_subscription<std_msgs::Bool>(
+        "/vins_imu_switch", 100, imu_switch_callback);
+    auto sub_cam_switch = node->create_subscription<std_msgs::Bool>(
+        "/vins_cam_switch", 100, cam_switch_callback);
 
     std::thread sync_thread{sync_process};
-    ros::spin();
-
+    rclcpp::spin(node);
+    if (sync_thread.joinable())
+        sync_thread.join();
+    rclcpp::shutdown();
     return 0;
 }
